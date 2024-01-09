@@ -1,0 +1,81 @@
+name: RESTEasy performance testing with JMeter
+# This workflow requires 3 components
+#   - This project, perf-poc
+#   - wildfly
+#   - JMeter
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+    branches:
+      - '**'
+
+env:
+  JMETER_VERSION: 5.6.2
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        java: ['11']
+
+    steps:
+      - name: Checkout perf-poc
+        uses: actions/checkout@v2
+      - name: Build perf-poc
+        run: mvn clean install
+
+      - name: Checkout wildfly
+        uses: actions/checkout@v2
+        with:
+          repository: wildfly/wildfly
+          path: './wildfly'
+      - uses: actions/cache@v3
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+      - name: Set up JDK ${{ matrix.java }}
+        uses: actions/setup-java@v2
+        with:
+          java-version: ${{ matrix.java }}
+          distribution: 'adopt'
+      - name: Build and start WFLY
+        working-directory: ./wildfly
+        run: |
+          mvn -DskipTests=true '-Denforcer.skip=true' clean install
+          ./dist/target/wildfly-*/bin/standalone.sh &
+      - name: Deploy test war
+        run: mvn wildfly:deploy
+
+      - name: Install jmeter
+        run: |
+          wget https://downloads.apache.org//jmeter/binaries/apache-jmeter-${{env.JMETER_VERSION}}.zip
+          unzip apache-jmeter-${{env.JMETER_VERSION}}.zip
+      - name: Perform JMeter Testing and generate report files
+        run: |
+          cd ./apache-jmeter-${{env.JMETER_VERSION}}/bin
+          ./jmeter -n -t ${{github.workspace}}/jmeter-files/Test-Plan-2.jmx \
+              -l ${{github.workspace}}/target/summary-2.csv \
+              -G ${{github.workspace}}/jmeter-files/jmeter.properties
+          
+          ./jmeter -g ${{github.workspace}}/target/summary-2.csv \
+              -o ${{github.workspace}}/target/report \
+              -G ${{github.workspace}}/jmeter-files/jmeter.properties
+      - name: Upload JMeter reports
+        uses: actions/upload-artifact@v3
+        with:
+          name: performance-report-${{ matrix.os }}-${{ matrix.java }}
+          path: ${{github.workspace}}/target/report
+
+      - name: Clean up env
+        run: |
+          cd ${{github.workspace}}
+          mvn wildfly:undeploy
+          ./wildfly/dist/target/wildfly-*/bin/jboss-cli.sh -c --commands=":shutdown"
